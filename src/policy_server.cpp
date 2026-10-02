@@ -38,6 +38,7 @@ public:
             config.path =
                 ament_index_cpp::get_package_share_directory("rmcs_rl") + "/" + config.path;
         config.input_name = string_or(*this, "input_name", "obs");
+        config.history_input_name = string_or(*this, "history_input_name", "");
         config.output_name = string_or(*this, "output_name", "actions");
         config.normalization_from_metadata = bool_or(*this, "normalization_from_metadata", true);
         if (const double clip = number_or(*this, "obs_clip", -1.0); clip >= 0.0)
@@ -66,6 +67,10 @@ public:
             get_logger(), "model_id=%s layout_hash=%s version=%s obs=%zu action=%zu",
             hex16(info.model_id).c_str(), hex16(info.layout_hash).c_str(), info.version.c_str(),
             info.obs_size, info.action_size);
+        RCLCPP_INFO(
+            get_logger(), "input contract: frame=%zu history=%zu (%s)", info.frame_size,
+            info.history_length,
+            info.frame_size * info.history_length == info.obs_size ? "ok" : "MISMATCH");
         RCLCPP_INFO(get_logger(), "obs signature: %s", info.obs_signature.c_str());
         RCLCPP_INFO(get_logger(), "action signature: %s", info.actions_signature.c_str());
         RCLCPP_INFO(get_logger(), "waiting for obs on %s/obs", rl_base.c_str());

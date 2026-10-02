@@ -115,6 +115,32 @@ TEST(ActionChannel, KeepsPreviousSnapshotWhenWriterOwnsLock) {
     writer.join();
 }
 
+TEST(OnnxRuntime, DualInputFeedsHistoryAndNewestFrame) {
+    OnnxRuntime runtime{RMCS_RL_DUAL_FIXTURE, "obs", "obs_history", "actions"};
+    ASSERT_TRUE(runtime.has_history_input());
+    EXPECT_EQ(runtime.input_size(), 125u);
+    EXPECT_EQ(runtime.frame_size(), 25u);
+    EXPECT_EQ(runtime.history_length(), 5u);
+    EXPECT_EQ(runtime.output_size(), 150u);
+
+    std::vector<float> input(runtime.input_size());
+    for (std::size_t i = 0; i < input.size(); ++i)
+        input[i] = static_cast<float>(i);
+    std::vector<float> output(runtime.output_size());
+    ASSERT_NO_THROW(runtime.run(input, output));
+    // Fixture is Concat(newest_frame, full_history); the frame is the trailing slice.
+    EXPECT_FLOAT_EQ(output.front(), 100.0f);
+    EXPECT_FLOAT_EQ(output[24], 124.0f);
+    EXPECT_FLOAT_EQ(output[25], 0.0f);
+    EXPECT_FLOAT_EQ(output.back(), 124.0f);
+}
+
+TEST(OnnxRuntime, RejectsHistoryInputForSingleInputModel) {
+    EXPECT_THROW(
+        (OnnxRuntime{RMCS_RL_IDENTITY_FIXTURE, "obs", "obs_history", "actions"}),
+        std::invalid_argument);
+}
+
 TEST(PolicyModel, NormalizesClipsAndRejectsInvalidFrames) {
     PolicyModel::Config config;
     config.path = RMCS_RL_IDENTITY_FIXTURE;

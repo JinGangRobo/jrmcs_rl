@@ -53,6 +53,10 @@ ros2 run rmcs_rl policy_server --ros-args --params-file <车辆配置.yaml>
 ## 模型与契约
 
 模型输入为 float32 `obs[batch,N]`，输出为 float32 `actions[batch,M]`，batch 为 1 或动态。
+也支持**双输入**模型（如训练导出常见的 `obs` + `obs_history`）：在 `policy_server` 上设置
+`history_input_name`（例如 `obs_history`），此时模型须有两个输入——每帧输入（较窄）与整段历史
+输入（较宽，为帧宽的整数倍）；桥发来的整段观测全部喂给历史输入，其**尾部一帧**喂给每帧输入。
+`input_name` 缺省 `obs`。单输入模型保持原行为（`history_input_name` 留空）。
 部署模型须含 `rmcs_obs_layout`、`rmcs_actions_layout`；建议带 `policy_layout_hash` 和版本。
 `history_length × 单帧维数 = rl_obs_size`。归一化均值和标准差必须成对提供，标准差为正数。
 

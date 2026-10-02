@@ -45,9 +45,11 @@ std::optional<double> clip_metadata(const OnnxRuntime& runtime, const char* key)
 } // namespace
 
 PolicyModel::PolicyModel(const Config& config)
-    : runtime_(config.path, config.input_name, config.output_name) {
+    : runtime_(config.path, config.input_name, config.history_input_name, config.output_name) {
     info_.path = config.path;
     info_.obs_size = runtime_.input_size();
+    info_.frame_size = runtime_.frame_size();
+    info_.history_length = runtime_.history_length();
     info_.action_size = runtime_.output_size();
     std::string error;
     if (!model_id_of_file(config.path, info_.model_id, error))

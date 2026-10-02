@@ -4,6 +4,7 @@
 #
 # 用法:
 #   stamp_model.sh <model名或路径> [--version X] [--config <yaml>] [--node rl_bridge]
+#                  [--input obs] [--history-input obs_history]
 #                  [--obs-mean a,b,... --obs-std a,b,...] [--obs-clip V] [--action-clip V]
 #
 # 例:
@@ -40,6 +41,8 @@ MODEL=""
 VERSION=""
 CONFIG="$DEFAULT_CONFIG"
 NODE="rl_bridge"
+INPUT="obs"
+HISTORY_INPUT=""
 EXTRA=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -57,6 +60,14 @@ while [[ $# -gt 0 ]]; do
         ;;
     --node)
         NODE="${2:?--node 需要值}"
+        shift 2
+        ;;
+    --input)
+        INPUT="${2:?--input 需要值}"
+        shift 2
+        ;;
+    --history-input)
+        HISTORY_INPUT="${2:?--history-input 需要值}"
         shift 2
         ;;
     --obs-mean | --obs-std | --obs-clip | --action-clip)
@@ -126,8 +137,10 @@ NEW_ID="$(printf '%s\n' "$STAMP_OUT" | sed -n 's/^model_id[[:space:]]*:[[:space:
 [[ -n "$NEW_ID" ]] || die "未能从盖章输出解析 model_id"
 
 log "复验 check_policy_contract ..."
+CHECK_IO=(--input "$INPUT")
+[[ -n "$HISTORY_INPUT" ]] && CHECK_IO+=(--history-input "$HISTORY_INPUT")
 "$PY" "$TOOL_DIR/check_policy_contract.py" "$MODEL_PATH" \
-    --config "$CONFIG" --node "$NODE" --expect-model-id "$NEW_ID" \
+    --config "$CONFIG" --node "$NODE" --expect-model-id "$NEW_ID" "${CHECK_IO[@]}" \
     || die "复验失败：模型已盖章，但契约校验未通过（见上面的 FAIL 项）"
 
 cat <<EOF
