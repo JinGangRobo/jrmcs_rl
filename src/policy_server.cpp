@@ -23,15 +23,49 @@
 
 namespace rmcs_rl {
 
+// 单进程可载多个策略：主策略 (rl_base/rl_model_path) + 可选第二策略 (jump_rl_base/jump_model_path)。
+// 每条策略各订阅 <base>/obs、发布 <base>/action，彼此独立。
 class PolicyServer final : public rclcpp::Node {
 public:
     PolicyServer()
         : Node(
               "policy_server",
               rclcpp::NodeOptions{}.automatically_declare_parameters_from_overrides(true)) {
-        const auto rl_base = string_or(*this, "rl_base", "/rl");
+        add_channel_(string_or(*this, "rl_base", "/rl"), string_or(*this, "rl_model_path", ""));
+
+        const auto jump_base = string_or(*this, "jump_rl_base", "");
+        const auto jump_model = string_or(*this, "jump_model_path", "");
+        if (!jump_base.empty() && !jump_model.empty()) {
+            try {
+                add_channel_(jump_base, jump_model);
+            } catch (const std::exception& error) {
+                RCLCPP_ERROR(
+                    get_logger(), "jump policy disabled (%s): %s", jump_base.c_str(), error.what());
+            }
+        }
+
+        if (bool_or(*this, "publish_status", false)) {
+            status_publisher_ = create_publisher<msg::PolicyStatus>(
+                channels_.front()->base + "/policy_status",
+                rclcpp::QoS{rclcpp::KeepLast(1)}.transient_local().best_effort());
+            const double rate = std::max(number_or(*this, "status_rate", 2.0), 0.1);
+            status_timer_ = create_wall_timer(
+                std::chrono::duration<double>(1.0 / rate), [this]() { publish_status(); });
+        }
+    }
+
+private:
+    struct Channel {
+        std::string base;
+        std::unique_ptr<PolicyModel> model;
+        rclcpp::Publisher<msg::Action>::SharedPtr action_publisher;
+        rclcpp::Subscription<msg::Observation>::SharedPtr observation_subscription;
+        bool layout_mismatch_logged = false;
+    };
+
+    void add_channel_(const std::string& base, const std::string& model_path) {
         PolicyModel::Config config;
-        config.path = string_or(*this, "rl_model_path", "");
+        config.path = model_path;
         if (config.path.empty())
             throw std::invalid_argument("policy_server: parameter 'rl_model_path' is required");
         if (config.path.front() != '/')
@@ -45,46 +79,44 @@ public:
             config.obs_clip = clip;
         if (const double clip = number_or(*this, "action_clip", -1.0); clip >= 0.0)
             config.action_clip = clip;
-        model_ = std::make_unique<PolicyModel>(config);
 
-        action_publisher_ = create_publisher<msg::Action>(
-            rl_base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
-        observation_subscription_ = create_subscription<msg::Observation>(
-            rl_base + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
-            [this](msg::Observation::UniquePtr message) { on_observation(std::move(message)); });
-        if (bool_or(*this, "publish_status", false)) {
-            status_publisher_ = create_publisher<msg::PolicyStatus>(
-                rl_base + "/policy_status",
-                rclcpp::QoS{rclcpp::KeepLast(1)}.transient_local().best_effort());
-            const double rate = std::max(number_or(*this, "status_rate", 2.0), 0.1);
-            status_timer_ = create_wall_timer(
-                std::chrono::duration<double>(1.0 / rate), [this]() { publish_status(); });
-        }
+        auto channel = std::make_unique<Channel>();
+        channel->base = base;
+        channel->model = std::make_unique<PolicyModel>(config);
+        channel->action_publisher = create_publisher<msg::Action>(
+            base + "/action", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort());
+        channel->observation_subscription = create_subscription<msg::Observation>(
+            base + "/obs", rclcpp::QoS{rclcpp::KeepLast(1)}.best_effort(),
+            [this, entry = channel.get()](
+                msg::Observation::UniquePtr message) { on_observation(*entry, std::move(message)); });
 
-        const auto& info = model_->info();
-        RCLCPP_INFO(get_logger(), "policy loaded: %s", info.path.c_str());
+        const auto& info = channel->model->info();
+        RCLCPP_INFO(get_logger(), "[%s] policy loaded: %s", base.c_str(), info.path.c_str());
         RCLCPP_INFO(
-            get_logger(), "model_id=%s layout_hash=%s version=%s obs=%zu action=%zu",
-            hex16(info.model_id).c_str(), hex16(info.layout_hash).c_str(), info.version.c_str(),
-            info.obs_size, info.action_size);
+            get_logger(), "[%s] model_id=%s layout_hash=%s version=%s obs=%zu action=%zu",
+            base.c_str(), hex16(info.model_id).c_str(), hex16(info.layout_hash).c_str(),
+            info.version.c_str(), info.obs_size, info.action_size);
         RCLCPP_INFO(
-            get_logger(), "input contract: frame=%zu history=%zu (%s)", info.frame_size,
-            info.history_length,
+            get_logger(), "[%s] input contract: frame=%zu history=%zu (%s)", base.c_str(),
+            info.frame_size, info.history_length,
             info.frame_size * info.history_length == info.obs_size ? "ok" : "MISMATCH");
-        RCLCPP_INFO(get_logger(), "obs signature: %s", info.obs_signature.c_str());
-        RCLCPP_INFO(get_logger(), "action signature: %s", info.actions_signature.c_str());
-        RCLCPP_INFO(get_logger(), "waiting for obs on %s/obs", rl_base.c_str());
+        RCLCPP_INFO(get_logger(), "[%s] obs signature: %s", base.c_str(),
+                    info.obs_signature.c_str());
+        RCLCPP_INFO(get_logger(), "[%s] action signature: %s", base.c_str(),
+                    info.actions_signature.c_str());
+        RCLCPP_INFO(get_logger(), "[%s] waiting for obs on %s/obs", base.c_str(), base.c_str());
+        channels_.push_back(std::move(channel));
     }
 
-private:
-    void on_observation(msg::Observation::UniquePtr message) {
-        const auto& info = model_->info();
+    void on_observation(Channel& channel, msg::Observation::UniquePtr message) {
+        const auto& info = channel.model->info();
         if (message->layout_hash != info.layout_hash) {
-            if (!layout_mismatch_logged_) {
-                layout_mismatch_logged_ = true;
+            if (!channel.layout_mismatch_logged) {
+                channel.layout_mismatch_logged = true;
                 RCLCPP_ERROR(
-                    get_logger(), "layout_hash mismatch: bridge=%s model=%s; refusing actions",
-                    hex16(message->layout_hash).c_str(), hex16(info.layout_hash).c_str());
+                    get_logger(), "[%s] layout_hash mismatch: bridge=%s model=%s; refusing actions",
+                    channel.base.c_str(), hex16(message->layout_hash).c_str(),
+                    hex16(info.layout_hash).c_str());
             }
             return;
         }
@@ -93,16 +125,17 @@ private:
         msg::Action action;
         action.action.resize(info.action_size);
         std::string error;
-        if (!model_->run(message->obs, action.action, error)) {
+        if (!channel.model->run(message->obs, action.action, error)) {
             RCLCPP_WARN_THROTTLE(
-                get_logger(), *get_clock(), 1000, "policy rejected observation: %s", error.c_str());
+                get_logger(), *get_clock(), 1000, "[%s] policy rejected observation: %s",
+                channel.base.c_str(), error.c_str());
             return;
         }
         action.header.stamp = get_clock()->now();
         action.obs_seq = message->obs_seq;
         action.layout_hash = info.layout_hash;
         action.model_id = info.model_id;
-        action_publisher_->publish(action);
+        channel.action_publisher->publish(action);
         const auto elapsed =
             std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - started);
         record_inference_time(elapsed.count());
@@ -126,7 +159,9 @@ private:
     }
 
     void publish_status() {
-        const auto& info = model_->info();
+        if (channels_.empty())
+            return;
+        const auto& info = channels_.front()->model->info();
         msg::PolicyStatus status;
         status.header.stamp = get_clock()->now();
         status.model_name = info.path;
@@ -140,12 +175,9 @@ private:
         status_publisher_->publish(status);
     }
 
-    rclcpp::Publisher<msg::Action>::SharedPtr action_publisher_;
-    rclcpp::Subscription<msg::Observation>::SharedPtr observation_subscription_;
+    std::vector<std::unique_ptr<Channel>> channels_;
     rclcpp::Publisher<msg::PolicyStatus>::SharedPtr status_publisher_;
     rclcpp::TimerBase::SharedPtr status_timer_;
-    std::unique_ptr<PolicyModel> model_;
-    bool layout_mismatch_logged_ = false;
     std::array<double, 256> inference_window_{};
     std::size_t inference_window_cursor_ = 0;
     std::size_t inference_window_count_ = 0;
